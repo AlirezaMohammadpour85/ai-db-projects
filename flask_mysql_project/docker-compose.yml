@@ -7,7 +7,7 @@ services:
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: zoho_accounts
+      MYSQL_DATABASE: domotz
       MYSQL_USER: zoho
       MYSQL_PASSWORD: zoho
     ports:
@@ -27,7 +27,7 @@ services:
       - DB_HOST=mysql
       - DB_USER=zoho
       - DB_PASSWORD=zoho
-      - DB_NAME=zoho_accounts
+      - DB_NAME=domotz
     ports:
       - "5000:5000"
     depends_on:

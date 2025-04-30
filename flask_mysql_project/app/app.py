@@ -14,32 +14,30 @@ def get_db_connection():
     """
     Establishes and returns a connection to the MySQL database using environment variables.
     Defaults are provided for local development.
+
+    env vars are defined in docker-compose.yml
     """
     return mysql.connector.connect(
         host=os.getenv("DB_HOST", "localhost"),
         user=os.getenv("DB_USER", "zoho"),
         password=os.getenv("DB_PASSWORD", "zoho"),
-        database=os.getenv("DB_NAME", "zoho_accounts"),
+        database=os.getenv("DB_NAME", "domotz"),
     )
 
 
 def create_table_from_csv(cursor, table_name, header):
     """
     Creates a table in the database with columns derived from the CSV header.
-    All columns are created with VARCHAR(255) data type.
-    Drops the table first if it exists to ensure a fresh start.
+    Uses TEXT data type to avoid MySQL row size limit.
     """
-    # Drop the table if it exists to ensure we start fresh
     drop_table_sql = f"DROP TABLE IF EXISTS `{table_name}`;"
     cursor.execute(drop_table_sql)
 
-    # Create the table with properly formed column names
-    columns = ", ".join(f"`{col}` VARCHAR(255)" for col in header)
-    create_table_sql = f"CREATE TABLE `{table_name}` ({columns});"
+    # Use TEXT instead of VARCHAR(255) to avoid row size error
+    columns = ", ".join(f"`{col}` TEXT" for col in header)
+    create_table_sql = f"CREATE TABLE `{table_name}` ({columns}) ROW_FORMAT=DYNAMIC;"
 
-    # Debug
     print(f"Creating table with SQL: {create_table_sql}")
-
     cursor.execute(create_table_sql)
 
 
@@ -104,13 +102,19 @@ def update_db():
 @app.route("/update-db-local", methods=["POST"])
 def update_db_local():
     """
-    Upload data from a CSV file already on the server.
+    Upload data from a CSV file already on the server, using batch inserts to handle large files.
+    for this version only accepts a single table at a time.
+    example request body:
+    {
+        "filename": "data.csv",
+        "table": "AccountsFinal"
+    }
     """
     data = request.get_json()
-    filename = "data.csv"
+    filename = data.get("filename")
     table_name = data.get("table")
-    if not table_name:
-        return jsonify({"error": "table name missing"}), 400
+    if not table_name or not filename:
+        return jsonify({"error": "table name or file name missing"}), 400
 
     file_directory = os.getenv("CSV_DIRECTORY", "/shared")
     file_path = os.path.join(file_directory, filename)
@@ -118,44 +122,62 @@ def update_db_local():
     if not os.path.isfile(file_path):
         return jsonify({"error": f"File {filename} not found"}), 404
 
+    BATCH_SIZE = 5000  # 1000
     try:
         with open(file_path, "r", encoding="utf-8") as file:
             db = get_db_connection()
             cursor = db.cursor()
             reader = csv.reader(file)
 
-            # Clean header first, replacing empty columns with named placeholders
+            # Clean header first
             raw_header = next(reader)
             header = [
                 col.strip() if col.strip() else f"column_{i}"
                 for i, col in enumerate(raw_header)
             ]
 
-            # Create table with cleaned header
+            # Create table
             create_table_from_csv(cursor, table_name, header)
 
-            # Prepare for data insertion
+            # Prepare insert statement
             num_columns = len(header)
             columns = ", ".join(f"`{col}`" for col in header)
             placeholders = ", ".join(["%s"] * num_columns)
             sql = f"INSERT INTO `{table_name}` ({columns}) VALUES ({placeholders})"
 
-            # Insert data rows
+            # Insert in batches
+            batch = []
+            count = 0
             for row in reader:
-                # Ensure row has correct number of columns
+                # Normalize row length
                 if len(row) < num_columns:
-                    row = row + [""] * (num_columns - len(row))
+                    row += [""] * (num_columns - len(row))
                 elif len(row) > num_columns:
                     row = row[:num_columns]
 
-                cursor.execute(sql, row)
+                batch.append(row)
+                count += 1
 
-            db.commit()
+                if len(batch) >= BATCH_SIZE:
+                    cursor.executemany(sql, batch)
+                    db.commit()
+                    print(f"{count} rows inserted...")
+                    batch = []
+
+            # Final batch
+            if batch:
+                cursor.executemany(sql, batch)
+                db.commit()
+                print(f"{count} rows inserted (final batch).")
+
             return jsonify(
-                {"message": f"Database updated successfully from {filename}"}
+                {
+                    "message": f"Database updated successfully from {filename}",
+                    "rows_inserted": count,
+                }
             )
+
     except Exception as e:
-        print(f"Error details: {str(e)}")
         import traceback
 
         traceback.print_exc()
@@ -213,11 +235,13 @@ def fetch_remote_file():
     {
         "url": "https://example.com/data.csv",
         "Authorization": "Bearer your_auth_token",
-        "ZANALYTICS-ORGID": "your_org_id"
+        "ZANALYTICS-ORGID": "your_org_id",
+        "filename": "AccountsFinal.csv"
     }
     """
     data = request.get_json()
     download_url = data.get("url")
+    filename = data.get("filename")
     auth_header = data.get("Authorization")
     org_id_header = data.get("ZANALYTICS-ORGID")
 
@@ -231,13 +255,13 @@ def fetch_remote_file():
         response.raise_for_status()
         file_directory = os.getenv("DOWNLOAD_DIRECTORY", "/shared")
         os.makedirs(file_directory, exist_ok=True)
-        file_path = os.path.join(file_directory, "data.csv")  # Always overwrite
+        file_path = os.path.join(file_directory, filename)  # Always overwrite
         with open(file_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
         return jsonify(
-            {"message": "File downloaded successfully", "filename": "data.csv"}
+            {"message": "File downloaded successfully", "filename": f"{filename}"}
         )
     except requests.RequestException as e:
         return jsonify({"error": f"Request failed: {str(e)}"}), 500
