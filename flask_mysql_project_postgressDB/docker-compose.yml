@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: zoho
+      POSTGRES_PASSWORD: zoho
+      POSTGRES_DB: domotz
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - shared_data:/shared
+    networks:
+      - flask_network
+
+  flask_app:
+    build: ./app
+    container_name: flask_app
+    restart: always
+    environment:
+      - FLASK_ENV=development
+      - DB_HOST=postgres
+      - DB_USER=zoho
+      - DB_PASSWORD=zoho
+      - DB_NAME=domotz
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+    volumes:
+      - shared_data:/shared
+    networks:
+      - flask_network
+
+volumes:
+  postgres_data:
+  shared_data:
+
+networks:
+  flask_network:
+    driver: bridge
